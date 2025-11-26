@@ -1,0 +1,17 @@
+# This file is a symlink to backend/requirements.txt
+# Railway will use backend/requirements.txt via railway.json config
+fastapi
+uvicorn
+pandas
+numpy
+scikit-learn
+openai
+python-dotenv
+pyarrow
+sentence-transformers>=3.0.0
+transformers>=4.40.0
+accelerate
+rank-bm25
+torch
+rapidfuzz
+
