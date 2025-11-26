@@ -24,7 +24,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "https://neurips-2025-map.vercel.app",
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",  # Allow all Vercel preview deploys
+    allow_origin_regex=r"https://.*\.vercel\.app", 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -239,10 +239,15 @@ async def search(request: SearchRequest):
     candidate_indices = list(set(fuzzy_indices) | set(dense_top_k) | set(sparse_top_k))
     print(f"   🔗 Combined: {len(candidate_indices)} unique candidates")
     
-    # Cap candidates for speed
-    if len(candidate_indices) > 30:
-        candidate_indices = candidate_indices[:30]
-        print(f"      └─ Capped to 30 for efficiency")
+    # Cap candidates for speed - REDUCE FROM 30 to 15
+    if len(candidate_indices) > 15:  # Changed from 30
+        # Prioritize dense retrieval results first (usually better quality)
+        dense_set = set(dense_top_k[:10])
+        sparse_set = set(sparse_top_k[:10]) 
+        fuzzy_set = set(fuzzy_indices)
+        
+        candidate_indices = list(dense_set | sparse_set | fuzzy_set)[:15]
+        print(f"      └─ Capped to 15 for efficiency")
         
     if not candidate_indices:
         print("❌ No candidates found!")
@@ -260,7 +265,8 @@ async def search(request: SearchRequest):
         for _, row in candidates.iterrows()
     ]
     
-    rerank_logits = reranker.predict(cross_input)
+    # Add batch_size parameter for faster processing
+    rerank_logits = reranker.predict(cross_input, batch_size=32)  # Process 32 at once
     print(f"   📊 Raw Logits Stats:")
     print(f"      • Shape: {rerank_logits.shape}")
     print(f"      • Min: {rerank_logits.min():.4f}")
