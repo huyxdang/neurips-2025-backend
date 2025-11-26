@@ -22,8 +22,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://neurips-2025-backend-production.up.railway.app",
-        "https://your-vercel-app.vercel.app",  # TODO: Replace with your actual Vercel URL
+        "https://neurips-2025-frontend-a8z2.vercel.app/",
     ],
     allow_origin_regex=r"https://.*\.vercel\.app",  # Allow all Vercel preview deploys
     allow_credentials=True,
