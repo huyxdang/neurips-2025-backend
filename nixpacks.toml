@@ -4,11 +4,13 @@ nixPkgs = ["python311", "python311Packages.pip"]
 [phases.install]
 cmds = [
     "python3 -m venv /opt/venv",
-    "/opt/venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cpu -r backend/requirements.txt"
+    "/opt/venv/bin/pip install --extra-index-url https://download.pytorch.org/whl/cpu --no-cache-dir -r backend/requirements.txt",
+    "cd backend && /opt/venv/bin/python download_models.py"
 ]
 
-[phases.build]
-cmds = ["echo 'Build complete'"]
+[variables]
+HF_HOME = "/app/.cache/huggingface"
+TRANSFORMERS_CACHE = "/app/.cache/huggingface"
 
 [start]
-cmd = "cd backend && /opt/venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT"
+cmd = "cd backend && /opt/venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1"
