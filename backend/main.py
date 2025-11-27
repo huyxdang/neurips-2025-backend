@@ -118,24 +118,34 @@ def refine_query_with_llm(query: str) -> tuple[str, bool]:
             model="gpt-4o-mini",
             messages=[{
                 "role": "system", 
-                "content": """You help users search for machine learning research papers.
+                "content": """You help users search for machine learning research papers at NeurIPS.
 
-TASK 1: Determine if this is a valid research paper search query.
-Valid queries: topics, methods, problems, algorithms, models, techniques
-Invalid queries: logistics, travel, dates, registration, locations, career advice, general questions
+TASK 1: Is this a request to find research papers on a topic?
+- YES if: asking about ANY scientific/technical topic, field, method, model, algorithm, problem, application domain
+- NO if: asking about logistics, travel, dates, registration, locations, deadlines, career advice, personal questions
 
-TASK 2: If valid, extract 2-5 core research keywords.
+Be PERMISSIVE. If someone mentions ANY topic that could have research papers, say YES.
 
-RESPOND IN THIS EXACT FORMAT:
-VALID: yes/no
-KEYWORDS: <keywords or "none">
+TASK 2: If YES, extract 2-5 search keywords.
+
+RESPOND IN THIS EXACT FORMAT (two lines only):
+VALID: yes
+KEYWORDS: <keywords>
+
+OR:
+VALID: no
+KEYWORDS: none
 
 Examples:
-User: "papers on transformers" → VALID: yes | KEYWORDS: transformers
-User: "how to get to neurips conference" → VALID: no | KEYWORDS: none
-User: "diffusion models for image generation" → VALID: yes | KEYWORDS: diffusion models image generation
-User: "when is the deadline?" → VALID: no | KEYWORDS: none
-User: "RLHF alignment" → VALID: yes | KEYWORDS: RLHF alignment"""
+"papers on transformers" → VALID: yes | KEYWORDS: transformers
+"biology" → VALID: yes | KEYWORDS: biology
+"find me papers on biology" → VALID: yes | KEYWORDS: biology
+"RLHF" → VALID: yes | KEYWORDS: RLHF reinforcement learning human feedback
+"how to get to neurips" → VALID: no | KEYWORDS: none
+"when is the deadline" → VALID: no | KEYWORDS: none
+"protein folding" → VALID: yes | KEYWORDS: protein folding
+"climate" → VALID: yes | KEYWORDS: climate
+"what's new in LLMs" → VALID: yes | KEYWORDS: large language models LLM"""
             }, {
                 "role": "user", 
                 "content": query
@@ -145,18 +155,22 @@ User: "RLHF alignment" → VALID: yes | KEYWORDS: RLHF alignment"""
         )
         
         result = response.choices[0].message.content.strip()
+        print(f"   └─ LLM response: {result}")  # Debug logging
         
-        # Parse response
-        is_valid = "VALID: yes" in result.lower() or "valid:yes" in result.lower()
+        # Parse response - be lenient
+        result_lower = result.lower()
+        is_valid = "valid: yes" in result_lower or "valid:yes" in result_lower
         
         # Extract keywords
-        if "KEYWORDS:" in result.upper():
-            keywords_part = result.upper().split("KEYWORDS:")[-1].strip()
-            keywords = keywords_part.lower().replace("none", "").strip()
+        if "keywords:" in result_lower:
+            keywords_part = result.split(":")[-1].strip()
+            # Clean up keywords
+            keywords = keywords_part.lower().replace("none", "").replace("|", "").strip()
         else:
             keywords = ""
         
-        refined = keywords if keywords else query
+        # Use original query if no keywords extracted
+        refined = keywords if keywords and keywords != "none" else query
         
         return (refined, is_valid)
         
