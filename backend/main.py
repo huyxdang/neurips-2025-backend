@@ -34,7 +34,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --- CONFIGURATION ---
 STOP_WORDS = set(["the", "a", "an", "and", "in", "on", "at", "to", "for", "of", "with", "is", "are"])
-MIN_RELEVANCE_SCORE = 0.9
+MIN_RELEVANCE_SCORE = 0.55
 
 def preprocess_text(text: str):
     text = text.lower()
@@ -105,25 +105,64 @@ def embed_query_specter2(query: str) -> np.ndarray:
     return embedding.astype('float32')
 
 
-def refine_query_with_llm(query: str) -> str:
-    """Use LLM to extract core research topic"""
+def refine_query_with_llm(query: str) -> tuple[str, bool]:
+    """
+    Use LLM to:
+    1. Extract core research topic
+    2. Detect if query is a valid research paper search
+    
+    Returns: (refined_query, is_valid_research_query)
+    """
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{
                 "role": "system", 
-                "content": "Extract only the core research topic from the user's question. Return 2-5 keywords max. Examples:\n'Find me papers on transformers' → 'transformers'\n'What are some good RL algorithms?' → 'reinforcement learning algorithms'\n'Show me diffusion model papers' → 'diffusion models'"
+                "content": """You help users search for machine learning research papers.
+
+TASK 1: Determine if this is a valid research paper search query.
+Valid queries: topics, methods, problems, algorithms, models, techniques
+Invalid queries: logistics, travel, dates, registration, locations, career advice, general questions
+
+TASK 2: If valid, extract 2-5 core research keywords.
+
+RESPOND IN THIS EXACT FORMAT:
+VALID: yes/no
+KEYWORDS: <keywords or "none">
+
+Examples:
+User: "papers on transformers" → VALID: yes | KEYWORDS: transformers
+User: "how to get to neurips conference" → VALID: no | KEYWORDS: none
+User: "diffusion models for image generation" → VALID: yes | KEYWORDS: diffusion models image generation
+User: "when is the deadline?" → VALID: no | KEYWORDS: none
+User: "RLHF alignment" → VALID: yes | KEYWORDS: RLHF alignment"""
             }, {
                 "role": "user", 
                 "content": query
             }],
-            max_tokens=20
+            max_tokens=50,
+            temperature=0
         )
-        refined = response.choices[0].message.content.strip()
-        return refined if refined else query
+        
+        result = response.choices[0].message.content.strip()
+        
+        # Parse response
+        is_valid = "VALID: yes" in result.lower() or "valid:yes" in result.lower()
+        
+        # Extract keywords
+        if "KEYWORDS:" in result.upper():
+            keywords_part = result.upper().split("KEYWORDS:")[-1].strip()
+            keywords = keywords_part.lower().replace("none", "").strip()
+        else:
+            keywords = ""
+        
+        refined = keywords if keywords else query
+        
+        return (refined, is_valid)
+        
     except Exception as e:
         print(f"⚠️ LLM refinement failed: {e}")
-        return query
+        return (query, True)  # Assume valid on error
 
 
 class SearchRequest(BaseModel):
@@ -138,13 +177,20 @@ async def search(request: SearchRequest):
     print(f"🔍 ORIGINAL QUERY: '{original_query}'")
     print("="*80)
     
-    # --- QUERY REFINEMENT ---
-    query = refine_query_with_llm(original_query)
+    # --- QUERY REFINEMENT + INTENT DETECTION ---
+    query, is_valid_research_query = refine_query_with_llm(original_query)
+    
     print(f"✨ REFINED QUERY: '{query}'")
-    if query != original_query:
-        print(f"   └─ Changed: YES (removed {len(original_query) - len(query)} chars)")
-    else:
-        print(f"   └─ Changed: NO")
+    print(f"   └─ Valid research query: {'YES' if is_valid_research_query else 'NO'}")
+    
+    # Reject non-research queries early
+    if not is_valid_research_query:
+        print("❌ REJECTED: Not a valid research paper query")
+        return {
+            "text": "I can only help you find research papers. Try searching for topics like 'diffusion models', 'reinforcement learning', or 'vision transformers'.",
+            "relatedIds": [],
+            "relatedPapers": []
+        }
     
     query_clean = query.lower().strip()
     query_hash = hashlib.md5(query_clean.encode()).hexdigest()
@@ -296,7 +342,7 @@ async def search(request: SearchRequest):
     print(f"      • Top-3 avg: {top_3_avg:.4f}")
     print(f"      • Threshold: {MIN_RELEVANCE_SCORE:.2f}")
 
-    if best_score < MIN_RELEVANCE_SCORE or top_3_avg < 0.9:
+    if best_score < MIN_RELEVANCE_SCORE or top_3_avg < 0.55:
         print(f"   ❌ REJECTED: Scores too low (best={best_score:.4f}, top3_avg={top_3_avg:.4f})")
         return {
             "text": "Sorry, your query doesn't seem to match any research topics in the dataset.",
