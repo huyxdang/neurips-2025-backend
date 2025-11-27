@@ -34,7 +34,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --- CONFIGURATION ---
 STOP_WORDS = set(["the", "a", "an", "and", "in", "on", "at", "to", "for", "of", "with", "is", "are"])
-MIN_RELEVANCE_SCORE = 0.55
+MIN_RELEVANCE_SCORE = 0.9
 
 def preprocess_text(text: str):
     text = text.lower()
@@ -296,7 +296,7 @@ async def search(request: SearchRequest):
     print(f"      • Top-3 avg: {top_3_avg:.4f}")
     print(f"      • Threshold: {MIN_RELEVANCE_SCORE:.2f}")
 
-    if best_score < MIN_RELEVANCE_SCORE or top_3_avg < 0.55:
+    if best_score < MIN_RELEVANCE_SCORE or top_3_avg < 0.9:
         print(f"   ❌ REJECTED: Scores too low (best={best_score:.4f}, top3_avg={top_3_avg:.4f})")
         return {
             "text": "Sorry, your query doesn't seem to match any research topics in the dataset.",
