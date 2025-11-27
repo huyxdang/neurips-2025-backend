@@ -34,13 +34,6 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --- CONFIGURATION ---
 STOP_WORDS = set(["the", "a", "an", "and", "in", "on", "at", "to", "for", "of", "with", "is", "are"])
-
-# Notes: 
-# - This is the minimum relevance score for a paper to be considered relevant.
-# - Sigmoid(positive) > 0.5 ==> relevant
-# - Sigmoid(0) = 0.5 ==> neutral / irrelevant
-# - Sigmoid(negative) < 0.5 ==> irrelevant
-# - We use 0.60 as the threshold to be considered relevant.
 MIN_RELEVANCE_SCORE = 0.55
 
 def preprocess_text(text: str):
@@ -55,7 +48,6 @@ def sigmoid(x):
 print("⏳ Loading Data...")
 df = pd.read_parquet("neurips_data.parquet")
 
-# Verify required columns exist
 required_columns = ['paper', 'authors', 'abstract', 'link', 'track', 'award', 
                     'paper_id', 'embedding', 'cluster', 'umap_x', 'umap_y', 
                     'cluster_name', 'problem', 'solution', 'eli5', 'tldr', 'keywords']
@@ -108,7 +100,6 @@ def embed_query_specter2(query: str) -> np.ndarray:
     
     with torch.no_grad():
         outputs = specter_model(**inputs)
-        # SPECTER2 uses CLS token
         embedding = outputs.last_hidden_state[:, 0, :].cpu().numpy()
     
     return embedding.astype('float32')
@@ -156,8 +147,6 @@ async def search(request: SearchRequest):
         print(f"   └─ Changed: NO")
     
     query_clean = query.lower().strip()
-    
-    # Hash the REFINED query for cache lookup
     query_hash = hashlib.md5(query_clean.encode()).hexdigest()
     
     # Check cache
@@ -169,14 +158,12 @@ async def search(request: SearchRequest):
 
     print("\n🔬 PRE-FLIGHT: Semantic Validation...")
 
-    # Embed query using SPECTER2 (same model used for papers)
     query_vec = embed_query_specter2(query)
     dataset_mean_embedding = embeddings.mean(axis=0, keepdims=True).astype('float32')
     semantic_similarity = cosine_similarity(query_vec, dataset_mean_embedding)[0][0]
 
     print(f"   📊 Semantic alignment with dataset: {semantic_similarity:.4f}")
 
-    # SPECTER2 embeddings have higher baseline similarity, adjust threshold
     SEMANTIC_THRESHOLD = 0.5
 
     if semantic_similarity < SEMANTIC_THRESHOLD:
@@ -190,7 +177,6 @@ async def search(request: SearchRequest):
 
     print(f"   ✅ PASSED: Query is semantically aligned")
     
-    # --- STEP 0: SANITY CHECK ---
     if len(query_clean) < 3:
         print("❌ Query too short, rejecting...")
         return {
@@ -199,7 +185,7 @@ async def search(request: SearchRequest):
             "relatedPapers": []
         }
  
-    # --- STEP 1: FUZZY MATCHING (Typos) ---
+    # --- STEP 1: FUZZY MATCHING ---
     print("\n📝 STEP 1: Fuzzy Title Matching...")
     fuzzy_matches = process.extract(
         query, 
@@ -220,8 +206,9 @@ async def search(request: SearchRequest):
     # A. Dense (using SPECTER2)
     dense_scores = cosine_similarity(query_vec, embeddings)[0]
     dense_top_k = np.argsort(dense_scores)[::-1][:30]
+    best_dense_score = dense_scores[dense_top_k[0]]
     print(f"   📊 Dense (SPECTER2 Vector): Top-30 retrieved")
-    print(f"      • Best score: {dense_scores[dense_top_k[0]]:.4f}")
+    print(f"      • Best score: {best_dense_score:.4f}")
     print(f"      • 30th score: {dense_scores[dense_top_k[-1]]:.4f}")
     
     # B. Sparse
@@ -239,15 +226,13 @@ async def search(request: SearchRequest):
     candidate_indices = list(set(fuzzy_indices) | set(dense_top_k) | set(sparse_top_k))
     print(f"   🔗 Combined: {len(candidate_indices)} unique candidates")
     
-    # Cap candidates for speed - REDUCE FROM 30 to 15
-    if len(candidate_indices) > 15:  # Changed from 30
-        # Prioritize dense retrieval results first (usually better quality)
-        dense_set = set(dense_top_k[:10])
-        sparse_set = set(sparse_top_k[:10]) 
+    # [OPTIMIZATION 2] Reduce candidates from 15 to 10
+    if len(candidate_indices) > 10:
+        dense_set = set(dense_top_k[:7])
+        sparse_set = set(sparse_top_k[:5]) 
         fuzzy_set = set(fuzzy_indices)
-        
-        candidate_indices = list(dense_set | sparse_set | fuzzy_set)[:15]
-        print(f"      └─ Capped to 15 for efficiency")
+        candidate_indices = list(dense_set | sparse_set | fuzzy_set)[:10]
+        print(f"      └─ Capped to 10 for efficiency")
         
     if not candidate_indices:
         print("❌ No candidates found!")
@@ -258,40 +243,49 @@ async def search(request: SearchRequest):
         }
 
     # --- STEP 3: RE-RANKING ---
-    print("\n🎯 STEP 3: Re-ranking with CrossEncoder...")
-    candidates = df.iloc[candidate_indices]
-    cross_input = [
-        [query, f"{row['paper']}: {row['abstract']}"] 
-        for _, row in candidates.iterrows()
-    ]
+    # [OPTIMIZATION 3] Skip reranking when dense score is very high
+    SKIP_RERANK_THRESHOLD = 0.85
     
-    # Add batch_size parameter for faster processing
-    rerank_logits = reranker.predict(cross_input, batch_size=32)  # Process 32 at once
-    print(f"   📊 Raw Logits Stats:")
-    print(f"      • Shape: {rerank_logits.shape}")
-    print(f"      • Min: {rerank_logits.min():.4f}")
-    print(f"      • Max: {rerank_logits.max():.4f}")
-    print(f"      • Mean: {rerank_logits.mean():.4f}")
-    
-    rerank_probs = sigmoid(rerank_logits)
-    print(f"   📊 After Sigmoid:")
-    print(f"      • Min: {rerank_probs.min():.4f}")
-    print(f"      • Max: {rerank_probs.max():.4f}")
-    print(f"      • Mean: {rerank_probs.mean():.4f}")
-    
-    scored_candidates = []
-    for idx, prob in zip(candidate_indices, rerank_probs):
-        scored_candidates.append((idx, prob))
+    if best_dense_score > SKIP_RERANK_THRESHOLD:
+        print(f"\n⚡ SKIP RERANK: Dense score {best_dense_score:.4f} > {SKIP_RERANK_THRESHOLD}")
+        print(f"   Using dense retrieval scores directly...")
+        scored_candidates = [(idx, float(dense_scores[idx])) for idx in dense_top_k[:10]]
+    else:
+        print("\n🎯 STEP 3: Re-ranking with CrossEncoder...")
+        candidates = df.iloc[candidate_indices]
         
-    scored_candidates.sort(key=lambda x: x[1], reverse=True)
+        # Use problem + solution (more concise and information-dense than abstract)
+        cross_input = [
+            [query, f"{row['paper']}: {row['problem']} {row['solution']}"] 
+            for _, row in candidates.iterrows()
+        ]
+        
+        rerank_logits = reranker.predict(cross_input, batch_size=32)
+        print(f"   📊 Raw Logits Stats:")
+        print(f"      • Shape: {rerank_logits.shape}")
+        print(f"      • Min: {rerank_logits.min():.4f}")
+        print(f"      • Max: {rerank_logits.max():.4f}")
+        print(f"      • Mean: {rerank_logits.mean():.4f}")
+        
+        rerank_probs = sigmoid(rerank_logits)
+        print(f"   📊 After Sigmoid:")
+        print(f"      • Min: {rerank_probs.min():.4f}")
+        print(f"      • Max: {rerank_probs.max():.4f}")
+        print(f"      • Mean: {rerank_probs.mean():.4f}")
+        
+        scored_candidates = []
+        for idx, prob in zip(candidate_indices, rerank_probs):
+            scored_candidates.append((idx, prob))
+            
+        scored_candidates.sort(key=lambda x: x[1], reverse=True)
     
     # Show top 10 after reranking
-    print(f"\n   🏆 Top 10 After Re-ranking:")
+    print(f"\n   🏆 Top 10 After Scoring:")
     for i, (idx, score) in enumerate(scored_candidates[:10], 1):
         paper_title = df.iloc[idx]['paper'][:60]
         print(f"      {i:2d}. {paper_title}... ({score:.4f})")
     
-    # --- STEP 4: STRICT FILTERING ---
+    # --- STEP 4: FILTERING ---
     print("\n🚦 STEP 4: Relevance Filtering...")
     
     best_score = scored_candidates[0][1]
@@ -312,11 +306,9 @@ async def search(request: SearchRequest):
     
     print(f"   ✅ PASSED: Query is relevant!")
     
-    # Filter by threshold
     filtered = [x for x in scored_candidates if x[1] > MIN_RELEVANCE_SCORE]
     print(f"   📋 Papers above {MIN_RELEVANCE_SCORE}: {len(filtered)}")
     
-    # Dynamic Selection
     final_indices = []
     final_scores = {}
     
@@ -341,7 +333,6 @@ async def search(request: SearchRequest):
     # --- STEP 5: GENERATION ---
     print("\n💬 STEP 5: Generating Summary with GPT...")
     
-    # Use tldr for context (shorter and more focused than eli5)
     context_text = ""
     for i, row in enumerate(final_results.itertuples(), 1):
         summary = row.tldr if pd.notna(row.tldr) and row.tldr else row.eli5
@@ -387,9 +378,6 @@ async def search(request: SearchRequest):
         print(f"   ⚠️ GPT generation failed: {e}")
         answer = "I found relevant papers, but couldn't generate a summary."
 
-    # Prepare response with correct column names
-    # New schema: paper, authors, abstract, link, track, award, paper_id, cluster, 
-    #             umap_x, umap_y, cluster_name, problem, solution, eli5, tldr, keywords
     papers_data = final_results[['paper_id', 'paper', 'authors', 'cluster_name', 
                                   'problem', 'solution', 'eli5', 'tldr', 'keywords',
                                   'abstract', 'link', 'track', 'award']].copy()
@@ -398,15 +386,12 @@ async def search(request: SearchRequest):
     for _, row in papers_data.iterrows():
         paper_id_str = str(row['paper_id']) if pd.notna(row['paper_id']) else ''
         
-        # Parse authors - handle string format like "['Author1', 'Author2']"
         authors = row['authors']
         if isinstance(authors, str):
-            # Try to parse as list-like string
             try:
                 import ast
                 authors = ast.literal_eval(authors)
             except:
-                # Fallback: split by comma
                 authors = [a.strip() for a in authors.split(',') if a.strip()]
         elif not isinstance(authors, list):
             authors = []
@@ -439,7 +424,6 @@ async def search(request: SearchRequest):
         "bestScore": float(best_score)
     }
     
-    # Cache result (limit size to 100 entries)
     if len(query_cache) < 100:
         query_cache[query_hash] = result
         print(f"💾 Cached result for refined query: '{query_clean}' (cache size: {len(query_cache)}/100)")
